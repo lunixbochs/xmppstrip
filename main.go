@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"code.google.com/p/go-uuid/uuid"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/spacemonkeygo/openssl"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -14,7 +16,10 @@ import (
 	"time"
 )
 
-var xmppClientIdent string = "<stream:stream xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' to='%s' version='1.0'>\n"
+var xmppClientIdent string = `<stream:stream xmlns:stream='http://etherx.jabber.org/streams' xmlns='jabber:client' to='%s' version='1.0'>\n`
+var xmppServerPreamble string = `<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' id='%s' from='%s' version='1.0' xml:lang='en'><stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'></starttls></stream:features>\n`
+var xmppClientStarttls string = `<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>\n`
+var xmppServerProceed string = `<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>\n`
 
 type PrefixLogger struct {
 	Prefix string
@@ -39,7 +44,6 @@ func CanStartClientTLS(conn net.Conn) bool {
 	var n int
 	for tlsFeatureMatch.Find(buf) == nil {
 		if err != nil {
-			log.Println(string(buf))
 			log.Println(err)
 			return false
 		}
@@ -60,7 +64,7 @@ func StartClientTLS(conn net.Conn) (net.Conn, error) {
 	if !CanStartClientTLS(conn) {
 		return nil, errors.New("Failed to starttls.")
 	}
-	_, err := conn.Write([]byte("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>\n"))
+	_, err := conn.Write([]byte(xmppClientStarttls))
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +73,7 @@ func StartClientTLS(conn net.Conn) (net.Conn, error) {
 	if !bytes.Contains(buf, []byte("<proceed")) {
 		return nil, errors.New("Server did not accept starttls.")
 	}
+	log.Println(string(buf))
 	ctx, err := openssl.NewCtx()
 	if err != nil {
 		return nil, err
@@ -80,8 +85,42 @@ func StartClientTLS(conn net.Conn) (net.Conn, error) {
 	return conn, nil
 }
 
-func StartServerTLS(conn net.Conn) error {
-	return nil
+func StartServerTLS(conn net.Conn, host string, key openssl.PrivateKey, cert *openssl.Certificate) (net.Conn, error) {
+	var err error
+	var n int
+	guid := uuid.New()
+	_, err = conn.Write([]byte(fmt.Sprintf(xmppServerPreamble, guid, host)))
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 1024)
+	pos := 0
+	for tlsFeatureMatch.Find(buf) == nil {
+		if err != nil {
+			log.Println(string(buf))
+			return nil, err
+		}
+		if pos > len(buf)-64 {
+			return nil, errors.New("client did not starttls")
+		}
+		n, err = conn.Read(buf[pos:])
+		pos += n
+	}
+	_, err = conn.Write([]byte(xmppServerProceed))
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := openssl.NewCtx()
+	if err != nil {
+		return nil, err
+	}
+	ctx.UseCertificate(cert)
+	ctx.UsePrivateKey(key)
+	conn, err = openssl.Server(conn, ctx)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 func main() {
@@ -90,15 +129,8 @@ func main() {
 	certPath := flag.String("cert", "", "path to SSL cert to serve to connecting clients")
 	keyPath := flag.String("key", "", "path to SSL private key")
 	verbose := flag.Bool("verbose", false, "verbose output")
+	clientTls := flag.Bool("clientTls", false, "use TLS for client (implicit if key/cert are specified)")
 	flag.Parse()
-
-	if certPath != nil {
-
-	}
-
-	if keyPath != nil {
-
-	}
 
 	args := flag.Args()
 	if len(args) < 1 {
@@ -116,8 +148,54 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Binding %s to %s\n", remote, *bind)
 
+	var cert *openssl.Certificate
+	var key openssl.PrivateKey
+	if *certPath != "" && *keyPath != "" {
+		*clientTls = true
+		log.Println("Using certificate:", *certPath)
+		log.Println("Using key:        ", *keyPath)
+		pem, err := ioutil.ReadFile(*certPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cert, err = openssl.LoadCertificateFromPEM(pem)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pem, err = ioutil.ReadFile(*keyPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		key, err = openssl.LoadPrivateKeyFromPEM(pem)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else if *clientTls {
+		log.Println("Generating self-signed certificate...")
+		key, err = openssl.GenerateRSAKey(2048)
+		if err != nil {
+			log.Fatal(err)
+		}
+		info := &openssl.CertificateInfo{
+			Serial:       1,
+			Issued:       0,
+			Expires:      24 * time.Hour,
+			Country:      "US",
+			Organization: "xmppstrip",
+			CommonName:   remoteHost,
+		}
+		cert, err = openssl.NewCertificate(info, key)
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = cert.Sign(key, openssl.EVP_SHA256)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	log.Printf("Binding %s to %s\n", remote, *bind)
 	ln, err := net.Listen("tcp", *bind)
 	if err != nil {
 		log.Fatal(err)
@@ -129,13 +207,14 @@ func main() {
 		}
 		log.Println("Connection from:", conn.RemoteAddr())
 		go func(client net.Conn) {
-			/*
-				err := StartServerTLS(client)
+			var err error
+			if *clientTls {
+				client, err = StartServerTLS(client, remoteHost, key, cert)
 				if err != nil {
 					log.Println(err)
 					return
 				}
-			*/
+			}
 			remoteConn, err := net.Dial("tcp", remote)
 			if err != nil {
 				log.Println(err)
