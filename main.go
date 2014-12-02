@@ -60,7 +60,7 @@ func CanStartClientTLS(conn net.Conn) bool {
 	return true
 }
 
-func StartClientTLS(conn net.Conn) (net.Conn, error) {
+func StartClientTLS(conn net.Conn, key openssl.PrivateKey, cert *openssl.Certificate) (net.Conn, error) {
 	if !CanStartClientTLS(conn) {
 		return nil, errors.New("Failed to starttls.")
 	}
@@ -73,10 +73,13 @@ func StartClientTLS(conn net.Conn) (net.Conn, error) {
 	if !bytes.Contains(buf, []byte("<proceed")) {
 		return nil, errors.New("Server did not accept starttls.")
 	}
-	log.Println(string(buf))
 	ctx, err := openssl.NewCtx()
 	if err != nil {
 		return nil, err
+	}
+	if cert != nil && key != nil {
+		ctx.UseCertificate(cert)
+		ctx.UsePrivateKey(key)
 	}
 	conn, err = openssl.Client(conn, ctx)
 	if err != nil {
@@ -101,7 +104,7 @@ func StartServerTLS(conn net.Conn, host string, key openssl.PrivateKey, cert *op
 			return nil, err
 		}
 		if pos > len(buf)-64 {
-			return nil, errors.New("client did not starttls")
+			return nil, errors.New("Client did not starttls")
 		}
 		n, err = conn.Read(buf[pos:])
 		pos += n
@@ -129,7 +132,10 @@ func main() {
 	certPath := flag.String("cert", "", "path to SSL cert to serve to connecting clients")
 	keyPath := flag.String("key", "", "path to SSL private key")
 	verbose := flag.Bool("verbose", false, "verbose output")
-	clientTls := flag.Bool("clientTls", false, "use TLS for client (implicit if key/cert are specified)")
+	clientTls := flag.Bool("clientTls", false, "use TLS for connecting client (implicit if key/cert are specified)")
+
+	clientCertPath := flag.String("clientCert", "", "path to SSL client cert")
+	clientKeyPath := flag.String("clientKey", "", "path to SSL client key")
 	flag.Parse()
 
 	args := flag.Args()
@@ -147,6 +153,29 @@ func main() {
 	}
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	var clientCert *openssl.Certificate
+	var clientKey openssl.PrivateKey
+	if *clientCertPath != "" && *clientKeyPath != "" {
+		log.Println("Using client certificate:", *clientCertPath)
+		log.Println("                with key:", *clientKeyPath)
+		pem, err := ioutil.ReadFile(*clientCertPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		clientCert, err = openssl.LoadCertificateFromPEM(pem)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pem, err = ioutil.ReadFile(*clientKeyPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		clientKey, err = openssl.LoadPrivateKeyFromPEM(pem)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	var cert *openssl.Certificate
@@ -225,7 +254,7 @@ func main() {
 				log.Println(err)
 				return
 			}
-			remoteConn, err = StartClientTLS(remoteConn)
+			remoteConn, err = StartClientTLS(remoteConn, clientKey, clientCert)
 			if err != nil {
 				log.Println(err)
 				return
