@@ -132,7 +132,7 @@ func main() {
 	certPath := flag.String("cert", "", "path to SSL cert to serve to connecting clients")
 	keyPath := flag.String("key", "", "path to SSL private key")
 	verbose := flag.Bool("verbose", false, "verbose output")
-	clientTls := flag.Bool("clientTls", false, "use TLS for connecting client (implicit if key/cert are specified)")
+	striptls := flag.Bool("striptls", true, "strip tls from client-side (overriden if key/cert are specified)")
 
 	clientCertPath := flag.String("clientCert", "", "path to SSL client cert")
 	clientKeyPath := flag.String("clientKey", "", "path to SSL client key")
@@ -181,7 +181,7 @@ func main() {
 	var cert *openssl.Certificate
 	var key openssl.PrivateKey
 	if *certPath != "" && *keyPath != "" {
-		*clientTls = true
+		*striptls = false
 		log.Println("Using certificate:", *certPath)
 		log.Println("Using key:        ", *keyPath)
 		pem, err := ioutil.ReadFile(*certPath)
@@ -200,7 +200,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-	} else if *clientTls {
+	} else if !*striptls {
 		log.Println("Generating self-signed certificate...")
 		key, err = openssl.GenerateRSAKey(2048)
 		if err != nil {
@@ -237,7 +237,7 @@ func main() {
 		log.Println("Connection from:", conn.RemoteAddr())
 		go func(client net.Conn) {
 			var err error
-			if *clientTls {
+			if !*striptls {
 				client, err = StartServerTLS(client, remoteHost, key, cert)
 				if err != nil {
 					log.Println(err)
